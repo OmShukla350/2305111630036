@@ -374,7 +374,7 @@ Log(
 - Consistent JSON response format
 - Versioned APIs (`/api/v1`)
 - Real-time communication using WebSockets
-
+---
 # Stage 2
 
 ## Database Selection
@@ -745,3 +745,298 @@ Composite indexes are introduced to optimize the most frequently executed querie
 The architecture supports future enhancements such as Redis caching, read replicas, database partitioning, and asynchronous processing without requiring major schema changes.
 
 This design aligns with the REST APIs defined in Stage 1 and provides a scalable, maintainable, and production-ready foundation for the Campus Notification Platform.
+--- 
+
+
+# Stage 3
+
+## Query Analysis
+
+The existing query used to fetch unread notifications is shown below:
+
+```sql
+SELECT *
+FROM notifications
+WHERE studentID = 1042
+AND isRead = false
+ORDER BY createdAt ASC;
+```
+
+---
+
+# Is the Query Accurate?
+
+The query is functionally correct because it retrieves all unread notifications for a specific student and sorts them by creation time.
+
+However, from a performance and scalability perspective, it is **not optimal** for a production database containing approximately **50,000 students** and **5 million notifications**.
+
+---
+
+# Why is this Query Slow?
+
+As the notification table grows, several performance bottlenecks appear.
+
+## 1. Full Table Scan
+
+Without an appropriate index, the database scans millions of records to locate notifications belonging to a single student.
+
+This increases query execution time significantly.
+
+---
+
+## 2. Expensive Sorting
+
+The query sorts the filtered notifications using
+
+```sql
+ORDER BY createdAt ASC
+```
+
+If no index exists on the sorting column, the database performs an additional sorting operation.
+
+---
+
+## 3. SELECT *
+
+The query retrieves every column from the table.
+
+In most cases, the frontend requires only a subset of fields such as
+
+* notification_id
+* title
+* message
+* notification_type
+* created_at
+
+Reading unnecessary columns increases disk I/O and memory usage.
+
+---
+
+## 4. Large Dataset
+
+With millions of notifications, sequential scans become increasingly expensive, resulting in slower response times.
+
+---
+
+# Optimized Query
+
+Instead of selecting every column, retrieve only the required fields.
+
+```sql
+SELECT
+notification_id,
+title,
+message,
+notification_type,
+created_at
+FROM notifications
+WHERE studentID = ?
+AND isRead = FALSE
+ORDER BY createdAt DESC;
+```
+
+Using descending order ensures the newest notifications appear first, which aligns with typical notification system behavior.
+
+---
+
+# Recommended Index
+
+The most appropriate index is a composite index.
+
+```sql
+CREATE INDEX idx_student_read_created
+ON notifications(studentID, isRead, createdAt DESC);
+```
+
+---
+
+# Why This Composite Index?
+
+The database filters by
+
+```text
+studentID
+```
+
+then
+
+```text
+isRead
+```
+
+and finally sorts by
+
+```text
+createdAt
+```
+
+The composite index follows exactly the same order as the query execution.
+
+This allows the database to:
+
+* Locate the student's records quickly.
+* Filter unread notifications efficiently.
+* Return results already sorted without an additional sort operation.
+
+---
+
+# Computational Cost
+
+## Without Index
+
+The database may perform a sequential scan across the notification table.
+
+Approximate complexity:
+
+```
+O(N)
+```
+
+where
+
+```
+N = Total Notifications
+```
+
+Sorting may further increase the cost to
+
+```
+O(N log N)
+```
+
+---
+
+## With Composite Index
+
+The lookup becomes an indexed search.
+
+Approximate complexity:
+
+```
+O(log N + K)
+```
+
+where
+
+* N = Total notifications
+* K = Matching unread notifications
+
+This significantly reduces execution time.
+
+---
+
+# Should Every Column Be Indexed?
+
+No.
+
+Creating indexes on every column is not recommended.
+
+## Reasons
+
+### Increased Storage
+
+Every index occupies additional disk space.
+
+---
+
+### Slower Inserts
+
+Whenever a new notification is inserted, all related indexes must also be updated.
+
+This increases write latency.
+
+---
+
+### Slower Updates
+
+Updating indexed columns requires updating every associated index.
+
+---
+
+### Higher Maintenance Cost
+
+Indexes require periodic maintenance and rebuilding.
+
+Too many indexes negatively impact overall database performance.
+
+---
+
+## Best Practice
+
+Only create indexes for
+
+* Frequently filtered columns
+* Frequently joined columns
+* Frequently sorted columns
+
+---
+
+# Query to Find Students Who Received Placement Notifications in the Last 7 Days
+
+Assuming the normalized schema from Stage 2.
+
+```sql
+SELECT DISTINCT
+u.user_id,
+u.full_name,
+u.email
+FROM users u
+JOIN user_notifications un
+ON u.user_id = un.user_id
+JOIN notifications n
+ON n.notification_id = un.notification_id
+WHERE
+n.notification_type = 'Placement'
+AND n.created_at >= CURRENT_DATE - INTERVAL '7 days';
+```
+
+---
+
+# Additional Optimization Techniques
+
+## Pagination
+
+Never fetch all notifications at once.
+
+Instead use
+
+```sql
+LIMIT 20 OFFSET 0;
+```
+
+---
+
+## Read Replicas
+
+Route read-heavy APIs such as notification retrieval to read replicas while writes continue on the primary database.
+
+---
+
+## Redis Cache
+
+Frequently accessed information such as unread notification counts can be cached to reduce database load.
+
+---
+
+## Table Partitioning
+
+Partition the notification table by creation date to reduce scan size as historical data grows.
+
+---
+
+## Covering Index
+
+If the database supports covering indexes, include frequently returned columns in the index to reduce table lookups.
+
+---
+
+# Design Decisions
+
+The optimized solution replaces a sequential scan with a composite index that matches the query pattern.
+
+Selecting only the required columns minimizes disk I/O and improves response time.
+
+Composite indexing provides efficient filtering and sorting while avoiding unnecessary indexes that would negatively impact insert and update performance.
+
+This approach supports millions of notification records while maintaining fast query execution and aligns with the database schema designed in Stage 2.
+

@@ -374,3 +374,374 @@ Log(
 - Consistent JSON response format
 - Versioned APIs (`/api/v1`)
 - Real-time communication using WebSockets
+
+# Stage 2
+
+## Database Selection
+
+### Recommended Database: PostgreSQL
+
+For the Campus Notification Platform, **PostgreSQL** is selected as the primary persistent storage because notifications are highly structured, require strong consistency, and involve frequent filtering, sorting, and updates.
+
+### Reasons for Choosing PostgreSQL
+
+* ACID-compliant transactions ensure reliable data storage.
+* Excellent support for indexing, filtering, and sorting.
+* Optimized for relational data and complex queries.
+* Supports foreign key constraints to maintain data integrity.
+* Provides JSON support for optional notification metadata.
+* Scales well with indexing, partitioning, and read replicas.
+
+---
+
+# Database Schema
+
+The system uses a normalized relational database with three tables.
+
+## 1. Users Table
+
+Stores student information.
+
+| Column     | Type         | Constraints               |
+| ---------- | ------------ | ------------------------- |
+| user_id    | UUID         | Primary Key               |
+| full_name  | VARCHAR(100) | NOT NULL                  |
+| email      | VARCHAR(255) | UNIQUE                    |
+| created_at | TIMESTAMP    | DEFAULT CURRENT_TIMESTAMP |
+
+---
+
+## 2. Notifications Table
+
+Stores notification details shared across one or more students.
+
+| Column            | Type                               | Constraints               |
+| ----------------- | ---------------------------------- | ------------------------- |
+| notification_id   | UUID                               | Primary Key               |
+| title             | VARCHAR(255)                       | NOT NULL                  |
+| message           | TEXT                               | NOT NULL                  |
+| notification_type | ENUM('Placement','Result','Event') | NOT NULL                  |
+| priority          | SMALLINT                           | DEFAULT 1                 |
+| created_at        | TIMESTAMP                          | DEFAULT CURRENT_TIMESTAMP |
+
+---
+
+## 3. User_Notifications Table
+
+Maps notifications to individual students while maintaining each student's read status.
+
+| Column          | Type      | Constraints                                  |
+| --------------- | --------- | -------------------------------------------- |
+| id              | UUID      | Primary Key                                  |
+| user_id         | UUID      | Foreign Key → Users(user_id)                 |
+| notification_id | UUID      | Foreign Key → Notifications(notification_id) |
+| is_read         | BOOLEAN   | DEFAULT FALSE                                |
+| read_at         | TIMESTAMP | NULL                                         |
+| delivered_at    | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP                    |
+
+---
+
+# Entity Relationship
+
+```
+Users
+------
+user_id (PK)
+
+        1
+        |
+        |
+        |
+        N
+
+User_Notifications
+-------------------
+id (PK)
+user_id (FK)
+notification_id (FK)
+is_read
+read_at
+
+        N
+        |
+        |
+        |
+        1
+
+Notifications
+--------------
+notification_id (PK)
+title
+message
+notification_type
+priority
+created_at
+```
+
+---
+
+# Why this Schema?
+
+Instead of storing duplicate notification records for every student, a single notification is stored once in the `Notifications` table while the `User_Notifications` table maintains each student's read status.
+
+This design:
+
+* Reduces data duplication.
+* Supports broadcasting one notification to thousands of students.
+* Allows every student to have independent read/unread status.
+* Improves maintainability.
+* Reduces storage requirements.
+
+---
+
+# Indexing Strategy
+
+The following indexes are recommended to optimize query performance.
+
+## Primary Indexes
+
+```sql
+PRIMARY KEY (user_id)
+
+PRIMARY KEY (notification_id)
+
+PRIMARY KEY (id)
+```
+
+---
+
+## Secondary Indexes
+
+```sql
+CREATE INDEX idx_user_notifications_user
+ON user_notifications(user_id);
+
+CREATE INDEX idx_user_notifications_read
+ON user_notifications(user_id,is_read);
+
+CREATE INDEX idx_notifications_created
+ON notifications(created_at DESC);
+
+CREATE INDEX idx_notifications_type
+ON notifications(notification_type);
+```
+
+### Purpose of Indexes
+
+| Index             | Purpose                                    |
+| ----------------- | ------------------------------------------ |
+| user_id           | Fetch notifications of one student quickly |
+| user_id + is_read | Fast unread notification lookup            |
+| created_at        | Fast sorting by latest notifications       |
+| notification_type | Efficient filtering                        |
+
+---
+
+# SQL Queries
+
+## Fetch Notifications
+
+```sql
+SELECT
+n.notification_id,
+n.title,
+n.message,
+n.notification_type,
+u.is_read,
+n.created_at
+FROM notifications n
+JOIN user_notifications u
+ON n.notification_id = u.notification_id
+WHERE u.user_id = ?
+ORDER BY n.created_at DESC
+LIMIT ? OFFSET ?;
+```
+
+---
+
+## Fetch Notification by ID
+
+```sql
+SELECT
+n.notification_id,
+n.title,
+n.message,
+n.notification_type,
+u.is_read,
+u.read_at
+FROM notifications n
+JOIN user_notifications u
+ON n.notification_id = u.notification_id
+WHERE u.user_id = ?
+AND n.notification_id = ?;
+```
+
+---
+
+## Mark Notification as Read
+
+```sql
+UPDATE user_notifications
+SET
+is_read = TRUE,
+read_at = CURRENT_TIMESTAMP
+WHERE
+user_id = ?
+AND notification_id = ?;
+```
+
+---
+
+## Mark All Notifications as Read
+
+```sql
+UPDATE user_notifications
+SET
+is_read = TRUE,
+read_at = CURRENT_TIMESTAMP
+WHERE
+user_id = ?
+AND is_read = FALSE;
+```
+
+---
+
+## Get Unread Notification Count
+
+```sql
+SELECT COUNT(*)
+FROM user_notifications
+WHERE
+user_id = ?
+AND is_read = FALSE;
+```
+
+---
+
+## Create Notification
+
+```sql
+INSERT INTO notifications
+(
+notification_id,
+title,
+message,
+notification_type,
+priority
+)
+VALUES
+(
+?,
+?,
+?,
+?,
+?
+);
+```
+
+---
+
+## Assign Notification to Students
+
+```sql
+INSERT INTO user_notifications
+(
+id,
+user_id,
+notification_id
+)
+VALUES
+(
+?,
+?,
+?
+);
+```
+
+---
+
+# Scalability Challenges
+
+As the number of students and notifications increases, the following issues may occur.
+
+### 1. Large Notification Table
+
+Millions of notifications will increase query execution time.
+
+### 2. Slow Sorting
+
+Ordering notifications by creation time becomes expensive.
+
+### 3. Slow Filtering
+
+Searching unread notifications without indexes leads to full table scans.
+
+### 4. High Read Traffic
+
+Students frequently open the notification page, increasing database load.
+
+### 5. Bulk Notification Delivery
+
+Placement notifications may be sent to tens of thousands of students simultaneously.
+
+### 6. Storage Growth
+
+Historical notifications continuously increase storage usage.
+
+---
+
+# Proposed Solutions
+
+## Proper Indexing
+
+Indexes significantly reduce lookup time for frequently executed queries.
+
+---
+
+## Pagination
+
+Use `page` and `limit` parameters to retrieve only a subset of notifications.
+
+---
+
+## Read Replicas
+
+Direct read-heavy APIs such as fetching notifications and unread counts to read replicas while writes continue on the primary database.
+
+---
+
+## Redis Cache
+
+Cache frequently requested values such as unread notification count.
+
+---
+
+## Database Partitioning
+
+Partition notifications by creation date (monthly or yearly) to reduce scan size.
+
+---
+
+## Background Workers
+
+Bulk notification assignment should be processed asynchronously using worker processes instead of blocking API requests.
+
+---
+
+## Archiving
+
+Move notifications older than a defined retention period (for example, one year) into archive tables to reduce active table size.
+
+---
+
+# Design Decisions
+
+The database design follows normalization principles to eliminate redundancy while maintaining flexibility and scalability.
+
+The `User_Notifications` table separates notification content from user-specific read status, enabling one notification to be delivered to many students without duplicating data.
+
+Composite indexes are introduced to optimize the most frequently executed queries, particularly unread notification retrieval and sorting by creation time.
+
+The architecture supports future enhancements such as Redis caching, read replicas, database partitioning, and asynchronous processing without requiring major schema changes.
+
+This design aligns with the REST APIs defined in Stage 1 and provides a scalable, maintainable, and production-ready foundation for the Campus Notification Platform.

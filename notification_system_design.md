@@ -1309,3 +1309,312 @@ No single optimization completely solves the performance problem. A production-r
 * Cache API responses on the client using **React Query**.
 
 Together, these optimizations significantly reduce database load, improve response times, and provide a scalable architecture capable of supporting millions of notifications while maintaining an excellent user experience.
+
+---
+# Stage 5
+
+## Analysis of the Current Implementation
+
+The proposed implementation processes each student sequentially.
+
+```python
+function notify_all(student_ids, message):
+    for student_id in student_ids:
+        send_email(student_id, message)
+        save_to_db(student_id, message)
+        push_to_app(student_id, message)
+```
+
+Although functionally correct, this approach does not scale for a notification system serving **50,000 students**.
+
+---
+
+# Shortcomings
+
+## 1. Sequential Processing
+
+Each student is processed one after another.
+
+If sending one email takes 200 ms:
+
+```text id="b8l0qz"
+50,000 × 200 ms
+
+≈ 10,000 seconds
+
+≈ 2.8 hours
+```
+
+This is unacceptable for placement notifications.
+
+---
+
+## 2. Single Point of Failure
+
+If `send_email()` throws an exception, execution may stop and the remaining students never receive notifications.
+
+---
+
+## 3. Partial Success
+
+Logs indicate that emails failed for 200 students.
+
+The current implementation provides:
+
+* no retry mechanism
+* no recovery strategy
+* no tracking of failed deliveries
+
+As a result, those students permanently miss the notification.
+
+---
+
+## 4. Tight Coupling
+
+Email delivery, database storage, and push notification delivery are tightly coupled inside the same loop.
+
+Failure of one operation directly affects the others.
+
+---
+
+## 5. Slow API Response
+
+The API waits until every email, database write, and push notification completes before responding.
+
+This causes long response times and poor user experience.
+
+---
+
+## 6. Poor Scalability
+
+As the number of students increases, execution time grows linearly.
+
+The implementation cannot efficiently support large notification campaigns.
+
+---
+
+# Should Database Save and Email Sending Happen Together?
+
+No.
+
+The notification should first be stored reliably in the database.
+
+Email and push notification delivery should occur asynchronously.
+
+## Reason
+
+The database is the source of truth.
+
+If an email fails but the notification is already stored:
+
+* The student can still view the notification in the application.
+* Email delivery can be retried later.
+* No notification is lost.
+
+This improves reliability and fault tolerance.
+
+---
+
+# Recommended Architecture
+
+```text id="n6r1k7"
+HR Clicks Notify All
+          │
+          ▼
+Create Notification
+          │
+          ▼
+Store Notification in Database
+          │
+          ▼
+Message Queue
+          │
+ ┌────────┴────────┐
+ │                 │
+ ▼                 ▼
+Email Worker   Push Worker
+ │                 │
+ ▼                 ▼
+Email API     WebSocket Server
+```
+
+---
+
+# Why Use a Message Queue?
+
+Examples:
+
+* RabbitMQ
+* Apache Kafka
+* Redis Streams
+* Amazon SQS
+
+The queue decouples notification creation from notification delivery.
+
+API requests complete immediately while background workers process delivery independently.
+
+---
+
+# Retry Strategy
+
+If email delivery fails:
+
+1. Mark the job as failed.
+2. Return it to the queue.
+3. Retry with exponential backoff.
+4. After the maximum retry count, move it to a Dead Letter Queue (DLQ) for manual inspection.
+
+This ensures temporary failures do not result in lost notifications.
+
+---
+
+# Revised Pseudocode
+
+```python
+function notify_all(student_ids, message):
+
+    notification_id = save_notification(message)
+
+    for student_id in student_ids:
+
+        map_notification_to_user(
+            notification_id,
+            student_id
+        )
+
+        enqueue_email_job(
+            student_id,
+            notification_id
+        )
+
+        enqueue_push_job(
+            student_id,
+            notification_id
+        )
+
+    return "Notification accepted for processing"
+```
+
+---
+
+# Email Worker
+
+```python
+while queue_has_jobs():
+
+    job = dequeue_email_job()
+
+    try:
+
+        send_email(job.student_id)
+
+        mark_email_sent(job)
+
+    except Exception:
+
+        retry_job(job)
+```
+
+---
+
+# Push Notification Worker
+
+```python
+while queue_has_jobs():
+
+    job = dequeue_push_job()
+
+    try:
+
+        push_to_app(job.student_id)
+
+        mark_push_sent(job)
+
+    except Exception:
+
+        retry_job(job)
+```
+
+---
+
+# Failure Handling
+
+If logs indicate email delivery failed for 200 students:
+
+* Notifications remain safely stored in the database.
+* Failed jobs are automatically retried.
+* If retries continue to fail, jobs are moved to the Dead Letter Queue.
+* Administrators can inspect and replay failed jobs without affecting successful deliveries.
+
+No student loses their notification.
+
+---
+
+# Logging Strategy
+
+Every important event should invoke the reusable logging middleware.
+
+Examples:
+
+```text id="z8c0k8"
+Log(
+"backend",
+"info",
+"service",
+"Bulk notification started"
+)
+```
+
+```text id="cjlwmf"
+Log(
+"backend",
+"error",
+"service",
+"Email delivery failed for student 1042"
+)
+```
+
+```text id="lh1t7q"
+Log(
+"backend",
+"info",
+"service",
+"Notification queued successfully"
+)
+```
+
+---
+
+# Advantages of the Redesigned Solution
+
+* Fast API response
+* Reliable notification storage
+* Independent email and push delivery
+* Automatic retry mechanism
+* Improved fault tolerance
+* Supports parallel processing
+* Easily scales to hundreds of thousands of students
+* Compatible with distributed worker architecture
+
+---
+
+# Trade-offs
+
+| Strategy           | Advantages                                    | Trade-offs                         |
+| ------------------ | --------------------------------------------- | ---------------------------------- |
+| Message Queue      | Decouples processing and improves scalability | Additional infrastructure required |
+| Background Workers | Parallel processing and faster delivery       | Worker monitoring required         |
+| Retry Mechanism    | Prevents notification loss                    | Slight increase in processing time |
+| Dead Letter Queue  | Supports recovery of failed jobs              | Requires operational monitoring    |
+
+---
+
+# Design Decisions
+
+The redesigned architecture separates notification creation from notification delivery.
+
+The database acts as the system of record, while asynchronous workers handle email and push notification delivery independently.
+
+Using a message queue ensures that failures in one delivery channel do not affect others. Retry mechanisms and Dead Letter Queues improve reliability and guarantee that temporary failures do not result in permanent notification loss.
+
+This architecture provides a scalable, fault-tolerant, and production-ready solution capable of handling notification delivery to tens of thousands of students simultaneously.

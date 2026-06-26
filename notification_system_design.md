@@ -1040,3 +1040,272 @@ Composite indexing provides efficient filtering and sorting while avoiding unnec
 
 This approach supports millions of notification records while maintaining fast query execution and aligns with the database schema designed in Stage 2.
 
+---
+# Stage 4
+
+## Performance Optimization Strategy
+
+As the number of students grows, fetching notifications directly from the database on every page load creates excessive database traffic. Every refresh generates a new database query, increasing CPU usage, I/O operations, and query latency, which results in poor user experience.
+
+To improve scalability and reduce database load, the following optimizations are recommended.
+
+---
+
+# 1. Redis Cache
+
+Instead of querying the database on every request, frequently accessed notification data and unread notification counts can be stored in Redis.
+
+## Workflow
+
+```text
+User Opens Notification Page
+        │
+        ▼
+Check Redis Cache
+        │
+ ┌──────┴──────┐
+ │             │
+Hit           Miss
+ │             │
+Return      Query Database
+Data            │
+ │              ▼
+ │         Store in Redis
+ └──────────────┘
+```
+
+### Advantages
+
+* Significantly reduces database reads.
+* Faster response times (milliseconds).
+* Improves user experience.
+* Reduces server load.
+
+### Trade-offs
+
+* Additional infrastructure is required.
+* Cached data may become temporarily stale.
+* Cache invalidation must be handled carefully whenever notifications change.
+
+---
+
+# 2. Pagination
+
+Notifications should never be loaded all at once.
+
+Instead, fetch notifications using page-based pagination.
+
+Example:
+
+```http
+GET /api/v1/notifications?page=1&limit=20
+```
+
+### Advantages
+
+* Smaller payload size.
+* Lower database load.
+* Faster rendering.
+* Better scalability.
+
+### Trade-offs
+
+* Additional API calls are required as the user navigates through pages.
+
+---
+
+# 3. Lazy Loading / Infinite Scrolling
+
+Instead of loading all notifications during page initialization, load only the first page.
+
+Additional notifications are fetched only when the user scrolls.
+
+### Advantages
+
+* Reduced initial page load time.
+* Better user experience.
+* Lower network bandwidth usage.
+
+### Trade-offs
+
+* Slightly more complex frontend implementation.
+* Requires additional API requests while scrolling.
+
+---
+
+# 4. WebSocket Based Real-Time Updates
+
+Instead of polling the server repeatedly, establish a persistent WebSocket connection after user authentication.
+
+Whenever a new notification is created, the server pushes it directly to connected clients.
+
+### Workflow
+
+```text
+Admin Creates Notification
+        │
+        ▼
+Store Notification in Database
+        │
+        ▼
+Push Event Through WebSocket
+        │
+        ▼
+Connected Student Receives Notification
+```
+
+### Advantages
+
+* Eliminates unnecessary polling.
+* Reduces database queries.
+* Real-time user experience.
+* Lower server overhead.
+
+### Trade-offs
+
+* Requires persistent client-server connections.
+* Slightly more complex infrastructure.
+* Connection management is required.
+
+---
+
+# 5. Read Replicas
+
+Separate read and write workloads.
+
+```text
+                Primary Database
+                     │
+          ┌──────────┴──────────┐
+          │                     │
+      Read Replica 1       Read Replica 2
+```
+
+Notification retrieval requests are routed to read replicas while all write operations continue on the primary database.
+
+### Advantages
+
+* Higher read throughput.
+* Reduced load on the primary database.
+* Improved scalability.
+
+### Trade-offs
+
+* Replication lag may cause recently created notifications to appear after a short delay.
+* Additional infrastructure cost.
+
+---
+
+# 6. Database Partitioning
+
+As notification history grows, storing all records in a single table negatively impacts query performance.
+
+Partition the notifications table based on creation date.
+
+Example:
+
+* Notifications_2025
+* Notifications_2026
+* Notifications_2027
+
+### Advantages
+
+* Faster scans.
+* Better maintenance.
+* Smaller indexes.
+* Easier archival.
+
+### Trade-offs
+
+* Increased schema complexity.
+* More administrative overhead.
+
+---
+
+# 7. Background Processing
+
+Bulk notification delivery should not happen inside the API request.
+
+Instead, use background workers.
+
+```text
+Admin Creates Notification
+        │
+        ▼
+API Stores Notification
+        │
+        ▼
+Message Queue
+        │
+        ▼
+Worker Processes
+        │
+        ▼
+Send Push / Email Notifications
+```
+
+### Advantages
+
+* Faster API responses.
+* Reliable delivery.
+* Better fault tolerance.
+
+### Trade-offs
+
+* Additional services such as RabbitMQ, Kafka, or Redis Streams are required.
+* Increased operational complexity.
+
+---
+
+# 8. Client-Side Caching
+
+Frequently accessed notification data can also be cached on the client using state management libraries such as React Query.
+
+Notifications are refreshed only when necessary.
+
+### Advantages
+
+* Reduces repeated API calls.
+* Faster page transitions.
+* Improved user experience.
+
+### Trade-offs
+
+* Cached data may become stale if not invalidated properly.
+
+---
+
+# Recommended Architecture
+
+```text
+             Client
+                │
+                ▼
+        Notification API
+                │
+      ┌─────────┴─────────┐
+      │                   │
+    Redis Cache      PostgreSQL
+      │                   │
+      └─────────┬─────────┘
+                │
+           WebSocket Server
+                │
+      Real-Time Notifications
+```
+
+---
+
+# Recommended Combined Strategy
+
+No single optimization completely solves the performance problem. A production-ready solution combines multiple strategies:
+
+* Use **Redis** to cache frequently accessed notification data and unread counts.
+* Implement **pagination** and **lazy loading** to limit the amount of data fetched per request.
+* Deliver new notifications through **WebSockets** instead of continuous polling.
+* Scale read traffic using **database read replicas**.
+* Partition notification tables as data volume grows.
+* Process bulk notification delivery asynchronously using **background workers**.
+* Cache API responses on the client using **React Query**.
+
+Together, these optimizations significantly reduce database load, improve response times, and provide a scalable architecture capable of supporting millions of notifications while maintaining an excellent user experience.
